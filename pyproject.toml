@@ -1,6 +1,6 @@
 [project]
 name = "prama"
-version = "0.1.0"
+version = "0.1.0a1"
 description = ""
 authors = [
     {name = "migo",email = "1695587905@qq.com"}
@@ -12,11 +12,18 @@ dependencies = [
 
 [tool.poetry]
 packages = [{include = "prama", from = "src"}]
+include = [
+    {path = "src/prama/lib/libsclite.so", format = ["sdist", "wheel"]},
+]
 
 [[tool.poetry.source]]
 name = "tuna"
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 priority = "primary"
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.3"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
