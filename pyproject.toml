@@ -1,12 +1,32 @@
 [project]
 name = "prama"
 version = "0.1.0a1"
-description = ""
+description = "Sclite-backed WER/CER evaluation engine for ASR outputs."
 authors = [
     {name = "migo",email = "1695587905@qq.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.10, <3.13"
+keywords = [
+    "asr",
+    "speech-recognition",
+    "sclite",
+    "wer",
+    "cer",
+    "evaluation",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
 ]
 
