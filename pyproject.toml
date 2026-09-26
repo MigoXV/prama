@@ -1,6 +1,6 @@
 [project]
 name = "prama"
-version = "0.1.0a1"
+version = "0.2.0a1"
 description = "Sclite-backed WER/CER evaluation engine for ASR outputs."
 authors = [
     {name = "migo",email = "1695587905@qq.com"}
