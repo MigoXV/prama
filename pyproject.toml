@@ -34,9 +34,12 @@ dependencies = [
 ]
 
 [tool.poetry]
+build = { script = "build_native.py", generate-setup-file = false }
 packages = [{include = "prama", from = "src"}]
 include = [
-    {path = "src/prama/lib/libsclite.so", format = ["sdist", "wheel"]},
+    {path = "build_native.py", format = "sdist"},
+    {path = "src/prama/native", format = "sdist"},
+    {path = "src/prama/lib/libsclite.so", format = ["wheel"]},
 ]
 
 [[tool.poetry.source]]
@@ -47,6 +50,10 @@ priority = "primary"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.3"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
