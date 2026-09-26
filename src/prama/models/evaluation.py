@@ -39,3 +39,15 @@ class WerResult:
     @property
     def accuracy(self) -> float:
         return self.summary.accuracy
+
+
+@dataclass(frozen=True, slots=True)
+class WerRecord:
+    sequence: int
+    group_index: int
+    utterance_index: int
+    group_name: str
+    utterance: WerUtterance
+    counts: ScliteCounts
+    cumulative: ScliteCounts
+    metric: str
