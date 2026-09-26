@@ -45,7 +45,7 @@ class ScliteOptions:
     optional_deletion: bool = False
     time_align: bool = False
     left_to_right: bool = True
-    infer_word_seg: bool = False
+    infer_word_seg: int = 0
     lexicon_path: str | Path | None = None
     infer_flags: int = 0
     reduce_ref_segments: bool = False
@@ -127,3 +127,15 @@ EVAL_LABELS = {
     0x10: "merge",
     0x20: "split",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class ScliteRecord:
+    sequence: int
+    group_index: int
+    utterance_index: int
+    group_name: str
+    utterance: ScliteUtterance
+    tokens: tuple[ScliteToken, ...]
+    counts: ScliteCounts
+    cumulative: ScliteCounts

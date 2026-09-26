@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import ctypes
 import os
+import threading
+import weakref
+from functools import wraps
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from prama._sclite_stream import ScliteStream
 from pathlib import Path
 
 from prama._sclite_native import (
+    RecordCallback,
     CCounts,
     COptions,
     CToken,
@@ -84,18 +92,36 @@ def _coerce_counts(counts: CCounts) -> ScliteCounts:
     )
 
 
+def _locked(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return call
+
+
 class ScliteClient:
     def __init__(self, lib_path: str | Path | None = None) -> None:
+        self._lock = threading.RLock()
+        self._streams = weakref.WeakSet()
         self._lib, resolved_path = load_sclite_library(lib_path)
-        self.lib_path = Path(resolved_path) if isinstance(resolved_path, Path) else resolved_path
+        self.lib_path = (
+            Path(resolved_path) if isinstance(resolved_path, Path) else resolved_path
+        )
         self._ctx = self._lib.sclite_context_new()
         if not self._ctx:
             raise ScliteError("failed to create sclite context")
 
     def close(self) -> None:
-        if getattr(self, "_ctx", None):
-            self._lib.sclite_context_free(self._ctx)
+        with self._lock:
+            ctx = getattr(self, "_ctx", None)
             self._ctx = None
+            streams = list(self._streams)
+        for stream in streams:
+            stream.close()
+        if ctx:
+            self._lib.sclite_context_free(ctx)
 
     def __enter__(self) -> ScliteClient:
         return self
@@ -109,6 +135,7 @@ class ScliteClient:
         except Exception:
             pass
 
+    @_locked
     def align_texts(
         self,
         ref_data: str | bytes,
@@ -117,13 +144,20 @@ class ScliteClient:
         ref_format: Format | str | int,
         hyp_format: Format | str | int,
         options: ScliteOptions | None = None,
+        _callback: RecordCallback | None = None,
     ) -> ScliteResult:
         self._ensure_open()
         ref_bytes = _to_bytes(ref_data)
         hyp_bytes = _to_bytes(hyp_data)
         c_options, keepalive = self._build_options(options)
         result = ctypes.c_void_p()
-        rc = self._lib.sclite_align_texts(
+        align = (
+            self._lib.sclite_align_texts
+            if _callback is None
+            else self._lib.sclite_align_texts_stream
+        )
+        extra = [] if _callback is None else [_callback, None]
+        rc = align(
             self._ctx,
             ref_bytes,
             len(ref_bytes),
@@ -132,6 +166,7 @@ class ScliteClient:
             len(hyp_bytes),
             int(_coerce_format(hyp_format)),
             ctypes.byref(c_options),
+            *extra,
             ctypes.byref(result),
         )
         if rc != 0:
@@ -155,7 +190,52 @@ class ScliteClient:
             options=options,
         )
 
-    def _build_options(self, options: ScliteOptions | None) -> tuple[COptions, list[bytes]]:
+    @_locked
+    def iter_align_texts(
+        self,
+        ref_data: str | bytes,
+        hyp_data: str | bytes,
+        *,
+        ref_format: Format | str | int,
+        hyp_format: Format | str | int,
+        options: ScliteOptions | None = None,
+    ) -> ScliteStream:
+        from prama._sclite_stream import ScliteStream
+
+        self._ensure_open()
+        if not hasattr(self._lib, "sclite_align_texts_stream"):
+            raise ScliteError("this sclite library does not support streaming")
+        stream = ScliteStream(
+            self.lib_path,
+            ref_data,
+            hyp_data,
+            ref_format=ref_format,
+            hyp_format=hyp_format,
+            options=options,
+        )
+        self._streams.add(stream)
+        return stream
+
+    def iter_align_files(
+        self,
+        ref_path: str | Path,
+        hyp_path: str | Path,
+        *,
+        ref_format: Format | str | int,
+        hyp_format: Format | str | int,
+        options: ScliteOptions | None = None,
+    ) -> ScliteStream:
+        return self.iter_align_texts(
+            Path(ref_path).read_bytes(),
+            Path(hyp_path).read_bytes(),
+            ref_format=ref_format,
+            hyp_format=hyp_format,
+            options=options,
+        )
+
+    def _build_options(
+        self, options: ScliteOptions | None
+    ) -> tuple[COptions, list[bytes]]:
         c_options = COptions()
         self._lib.sclite_options_init(ctypes.byref(c_options))
         if options is None:
@@ -171,7 +251,14 @@ class ScliteClient:
         )
         keepalive = [
             value
-            for value in (title, encoding, language_profile, lexicon_path, wwl_path, lm_path)
+            for value in (
+                title,
+                encoding,
+                language_profile,
+                lexicon_path,
+                wwl_path,
+                lm_path,
+            )
             if value is not None
         ]
         c_options.title = title
@@ -209,16 +296,27 @@ class ScliteResult:
         ctx: int,
         result: ctypes.c_void_p,
         keepalive: list[bytes],
+        *,
+        borrowed: bool = False,
     ) -> None:
+        self._lock = threading.RLock()
         self._lib = lib
-        self._ctx = ctx
+        self._borrowed = borrowed
+        self._ctx = ctx if borrowed else lib.sclite_context_new()
         self._result = result
+        if not self._ctx:
+            self.close()
+            raise ScliteError("failed to create result context")
         self._keepalive = keepalive
 
+    @_locked
     def close(self) -> None:
         if self._result:
-            self._lib.sclite_result_free(self._result)
+            if not self._borrowed:
+                self._lib.sclite_result_free(self._result)
+                self._lib.sclite_context_free(self._ctx)
             self._result = None
+            self._ctx = None
 
     def __enter__(self) -> ScliteResult:
         return self
@@ -232,6 +330,7 @@ class ScliteResult:
         except Exception:
             pass
 
+    @_locked
     def summary(self) -> ScliteCounts:
         self._ensure_open()
         counts = CCounts()
@@ -239,6 +338,7 @@ class ScliteResult:
             raise ScliteError("failed to read sclite summary")
         return _coerce_counts(counts)
 
+    @_locked
     def groups(self) -> list[ScliteGroup]:
         self._ensure_open()
         count = self._lib.sclite_result_group_count(self._result)
@@ -256,45 +356,49 @@ class ScliteResult:
             )
             if rc != 0:
                 raise ScliteError(f"failed to read sclite group {group_index}")
-            groups.append(ScliteGroup(name=_decode(name.value), counts=_coerce_counts(counts)))
+            groups.append(
+                ScliteGroup(name=_decode(name.value), counts=_coerce_counts(counts))
+            )
         return groups
 
+    @_locked
     def utterances(self, group_index: int = 0) -> list[ScliteUtterance]:
         self._ensure_open()
         count = self._lib.sclite_result_utterance_count(self._result, group_index)
         if count < 0:
             raise ScliteError(f"failed to read utterance count for group {group_index}")
-        utterances: list[ScliteUtterance] = []
-        for utterance_index in range(count):
-            utterance = CUtterance()
-            rc = self._lib.sclite_result_utterance(
-                self._result,
-                group_index,
-                utterance_index,
-                ctypes.byref(utterance),
-            )
-            if rc != 0:
-                raise ScliteError(f"failed to read utterance {utterance_index}")
-            utterances.append(
-                ScliteUtterance(
-                    id=_decode(utterance.id),
-                    labels=_decode(utterance.labels),
-                    file=_decode(utterance.file),
-                    channel=_decode(utterance.channel),
-                    ref_start=utterance.ref_start,
-                    ref_end=utterance.ref_end,
-                    hyp_start=utterance.hyp_start,
-                    hyp_end=utterance.hyp_end,
-                    token_count=utterance.token_count,
-                )
-            )
-        return utterances
+        return [self.utterance(group_index, i) for i in range(count)]
 
-    def tokens(self, group_index: int = 0, utterance_index: int = 0) -> list[ScliteToken]:
-        utterances = self.utterances(group_index)
-        if utterance_index < 0 or utterance_index >= len(utterances):
-            raise ScliteError(f"utterance index out of range: {utterance_index}")
-        token_count = utterances[utterance_index].token_count
+    @_locked
+    def utterance(
+        self, group_index: int = 0, utterance_index: int = 0
+    ) -> ScliteUtterance:
+        self._ensure_open()
+        u = CUtterance()
+        if (
+            self._lib.sclite_result_utterance(
+                self._result, group_index, utterance_index, ctypes.byref(u)
+            )
+            != 0
+        ):
+            raise ScliteError("utterance index out of range")
+        return ScliteUtterance(
+            _decode(u.id),
+            _decode(u.labels),
+            _decode(u.file),
+            _decode(u.channel),
+            u.ref_start,
+            u.ref_end,
+            u.hyp_start,
+            u.hyp_end,
+            u.token_count,
+        )
+
+    @_locked
+    def tokens(
+        self, group_index: int = 0, utterance_index: int = 0
+    ) -> list[ScliteToken]:
+        token_count = self.utterance(group_index, utterance_index).token_count
         tokens: list[ScliteToken] = []
         for token_index in range(token_count):
             token = CToken()
@@ -325,6 +429,7 @@ class ScliteResult:
             )
         return tokens
 
+    @_locked
     def report_text(self, report_type: ReportType | str | int = ReportType.PRA) -> str:
         self._ensure_open()
         out_data = ctypes.c_void_p()
@@ -337,7 +442,10 @@ class ScliteResult:
             ctypes.byref(out_len),
         )
         if rc != 0:
-            raise ScliteError("failed to generate sclite report")
+            raise ScliteError(
+                _decode(self._lib.sclite_context_error(self._ctx))
+                or "failed to generate sclite report"
+            )
         try:
             data = ctypes.string_at(out_data, out_len.value)
             return data.decode("utf-8", errors="replace")

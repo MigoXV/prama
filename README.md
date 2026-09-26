@@ -170,3 +170,99 @@ poetry run pytest
 ```
 
 测试用例位于 `tests/test_sclite`，覆盖高层评估 API 和底层 `sclite` wrapper。
+
+## 从源码构建与安装产物
+
+C 源码随项目维护，不需要旧版本的 `libsclite.so`。构建环境需要 Linux、C11 编译器、系统 C 开发头文件、Python 和 Poetry：
+
+```bash
+poetry install
+poetry run python build_native.py  # 开发环境编译
+poetry build                      # 生成 sdist，并重新编译 C 库生成 wheel
+```
+
+`dist/` 中的 wheel 包含 Python 代码和原生动态库，安装后可以直接使用，运行时不需要编译器，也不会从其他项目复制动态库：
+
+```bash
+# 将下面的文件名替换为实际生成的 wheel 文件名
+poetry add ./dist/prama-0.1.0a1-cp310-cp310-linux_x86_64.whl
+```
+
+wheel 对应构建时的 Python、Linux 架构和系统运行库，不能跨操作系统使用。需要其他 Python 版本或系统环境时，从 sdist 在目标环境运行 `poetry build`。源码包包含完整原生源码和构建脚本。
+
+## 逐条读取评测结果
+
+```python
+from prama.evaluator import iter_wer
+
+with iter_wer(
+    ["hello world", "speech recognition"],
+    ["hello word", "speech recognition now"],
+) as stream:
+    for record in stream:
+        print(record.sequence, record.utterance.id)
+        print(record.utterance.tokens)
+        print(record.counts.wer, record.cumulative.wer)
+    result = stream.result()
+
+print(result.report)
+```
+
+- `iter_cer` 用法相同；复用评估器时调用 `Evaluator.iter_wer` / `iter_cer`。
+- 底层使用 `ScliteClient.iter_align_texts` / `iter_align_files`，参数与批量方法一致。事件额外提供时间、文件、channel、标签及完整 token 元数据。
+- 每条记录在原生对齐和元数据补齐后交付，按原生处理顺序输出；最终结果保持原有分组顺序。
+- 输入仍是完整文本或文本列表；流式能力针对结果输出，不改变原版分段或对齐算法。
+- 生产线程通过容量为 16 的队列交付结果，慢消费者会产生背压。最终结果保留所有对齐信息，内存仍随结果规模增长。
+- 提前 `break` 时使用 `with`，或显式 `close()`。关闭会请求取消并等待生产线程释放资源；单条记录的原生计算完成后才能响应记录边界上的取消。
+- `result()` 必须在迭代结束后调用。底层 `ScliteResult` 随流关闭；已交付事件和高层 `WerResult` 是独立 Python 数据，关闭后仍可读取。
+- 后台错误在迭代时抛出，已交付记录不失效，失败或取消的任务不返回完整最终结果。
+
+## 多线程使用
+
+新库的原生可变状态采用线程局部存储，包括编码、动态规划缓存、报告缓存、回调和错误恢复状态。不同线程可同时进行批量计算、流式计算和报告生成；一个流暂停或取消不会阻塞其他任务，不需要多进程。
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+from prama.evaluator import get_wer
+
+with ThreadPoolExecutor(max_workers=8) as pool:
+    results = list(pool.map(
+        lambda pair: get_wer([pair[0]], [pair[1]]),
+        [("hello world", "hello word"), ("a b", "a b c")],
+    ))
+```
+
+共享同一个 `Evaluator` / `ScliteClient` 的批量调用也支持多线程使用，同一 client 的入口调用由锁保护。需要原生计算同时执行时，每个线程使用自己的 client，或使用模块级函数。多个流分别持有自己的原生上下文，可以同时运行。
+
+单个流使用一个消费者线程；允许从其他线程调用 `close()` 取消它。结果对象的方法和关闭操作有锁保护。直接调用 C ABI 时，同一个 context/result 句柄须由调用者同步；不得从原生回调中递归发起对齐或报告生成。
+
+旧版本 `.so` 仍可用于批量接口兼容性验证；它不提供新增流式接口，也不保证上述原生线程隔离能力。
+
+## 格式、选项与错误处理
+
+当前构建启用 TRN/TRN、STM/CTM 和 CTM/CTM，支持字符对齐、大小写、可选删除、片段匹配、时间对齐、分段裁剪、词权重和两种分词推断算法。`infer_word_seg` 为 `0`、`1` 或 `2`，分别表示关闭、algo1、algo2。
+
+与基准构建一致，GNU diff 与 SLM 未启用：STM/TXT 和语言模型选项会明确报错。互不兼容的格式和选项不会被静默忽略。数据解析失败转换为 `ScliteError`，不会由 C 的 `exit()` 终止 Python 进程。
+
+`wer` 和 `accuracy` 使用百分数；为兼容已有接口，`accuracy = 100 - wer`。参考词数为零时沿用 sclite 的 `wer = 0` 约定。
+
+## 可复现验证
+
+```bash
+# 从未修改的 SCTK 工作副本构建权威基准
+poetry run python scripts/build_reference.py
+poetry run pytest
+
+# 固定种子的 10,000 对数据，同时验证 WER 与 CER
+poetry run python scripts/check_alignment.py \
+  --cli build/original/sclite/sclite --count 10000
+
+# 实际 poetry build、独立安装 wheel、从 sdist 重建并重复测试
+poetry run python scripts/verify_distribution.py
+```
+
+分发验收会在仓库之外创建两个独立 Poetry 环境，清除源码路径和动态库路径覆盖，确认实际加载安装目录中的 Python 包与 `.so`，并在两套产物上分别运行测试和 10,000 对数据对照。日志与 SHA-256 写入 `outputs/distribution/`。
+
+原生内存和线程检查使用 `scripts/native_stress.c`、`scripts/native_threads.c`，覆盖正常返回、报告、错误、取消、并发回调及跨线程释放。ASan/UBSan/LSan、Valgrind Memcheck 和 Helgrind 的日志保存到 `outputs/`。报告比较仅规范化文件路径和生成日期；计分、token 和报告正文与原版对齐。
+
+旧 `.so` 的一个已确认差异：连续调用时 SGML 的 `sequence` 序号会跨任务累加。新库每次任务从零开始，与每次独立执行原版 `sclite` 一致。对照脚本会单独记录此差异，不会通过忽略 token、计数或报告正文来掩盖算法差异。

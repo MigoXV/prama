@@ -36,6 +36,11 @@ class COptions(ctypes.Structure):
     ]
 
 
+RecordCallback = ctypes.CFUNCTYPE(
+    ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int
+)
+
+
 class CCounts(ctypes.Structure):
     _fields_ = [
         ("ref_words", ctypes.c_int),
@@ -110,7 +115,9 @@ def find_sclite_library(lib_path: str | Path | None = None) -> str | Path:
     raise FileNotFoundError(f"{LIB_FILENAME} not found. Checked: {', '.join(checked)}")
 
 
-def load_sclite_library(lib_path: str | Path | None = None) -> tuple[ctypes.CDLL, str | Path]:
+def load_sclite_library(
+    lib_path: str | Path | None = None,
+) -> tuple[ctypes.CDLL, str | Path]:
     resolved_path = find_sclite_library(lib_path)
     library = ctypes.CDLL(str(resolved_path))
     configure_library(library)
@@ -118,6 +125,7 @@ def load_sclite_library(lib_path: str | Path | None = None) -> tuple[ctypes.CDLL
 
 
 def configure_library(library: ctypes.CDLL) -> None:
+    library.sclite_context_new.argtypes = []
     library.sclite_context_new.restype = ctypes.c_void_p
     library.sclite_context_free.argtypes = [ctypes.c_void_p]
     library.sclite_options_init.argtypes = [ctypes.POINTER(COptions)]
@@ -173,3 +181,17 @@ def configure_library(library: ctypes.CDLL) -> None:
     ]
     library.sclite_result_report_text.restype = ctypes.c_int
     library.sclite_free_string.argtypes = [ctypes.c_void_p]
+
+    for name in (
+        "sclite_context_free",
+        "sclite_options_init",
+        "sclite_result_free",
+        "sclite_free_string",
+    ):
+        getattr(library, name).restype = None
+    if hasattr(library, "sclite_align_texts_stream"):
+        library.sclite_align_texts_stream.argtypes = (
+            library.sclite_align_texts.argtypes[:-1]
+            + [RecordCallback, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+        )
+        library.sclite_align_texts_stream.restype = ctypes.c_int

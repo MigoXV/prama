@@ -5,6 +5,7 @@ from prama._sclite_types import (
     Format,
     IdType,
     ReportType,
+    ScliteRecord,
     ScliteCounts,
     ScliteError,
     ScliteGroup,
@@ -19,6 +20,8 @@ __all__ = [
     "IdType",
     "ReportType",
     "ScliteClient",
+    "ScliteRecord",
+    "ScliteStream",
     "ScliteCounts",
     "ScliteError",
     "ScliteGroup",
@@ -28,3 +31,5 @@ __all__ = [
     "ScliteUtterance",
     "find_sclite_library",
 ]
+
+from prama._sclite_stream import ScliteStream
