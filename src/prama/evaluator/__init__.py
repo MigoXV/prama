@@ -7,7 +7,11 @@ from prama.evaluator.evaluator import (
     iter_wer,
 )
 
+from prama.evaluator.vad import VadEvaluator, evaluate_masks
+
 __all__ = [
+    "VadEvaluator",
+    "evaluate_masks",
     "Evaluator",
     "EvaluationStream",
     "get_cer",

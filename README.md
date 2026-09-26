@@ -2,11 +2,12 @@
 
 `prama` 是一个基于 `sclite` 的语音识别评估引擎，用于在 Python 中计算 ASR 结果的 WER（Word Error Rate）和 CER（Character Error Rate），并返回可继续分析的对齐结果、汇总统计和 `sclite` 报告文本。
 
-当前包的定位是轻量评估库：高层 API 面向文本列表评估，底层保留 `ScliteClient` 以便直接调用 `sclite` 对齐能力。
+当前包支持文本列表的 WER/CER 评估和布尔 mask 的 VAD 帧级、段级评估，底层保留 `ScliteClient` 以便直接调用 `sclite` 对齐能力。
 
 ## 功能特性
 
 - 计算 WER 和 CER。
+- 使用纯 NumPy 计算 VAD 帧级和段级指标，不依赖 SciPy。
 - 支持多条 utterance 批量评估。
 - 返回总体统计、分组统计、逐 token 对齐结果和 PRA 文本报告。
 - 封装 `libsclite.so`，默认从包内 `src/prama/lib/libsclite.so` 查找动态库。
@@ -15,6 +16,7 @@
 ## 环境要求
 
 - Python `>=3.10, <3.13`
+- NumPy `>=2.2, <2.3`（随包自动安装）
 - Linux 环境
 - Poetry
 
@@ -73,6 +75,50 @@ with Evaluator() as evaluator:
 
 print(wer_result.wer)
 print(cer_result.cer)
+```
+
+## VAD 帧级与段级评估
+
+```python
+import numpy as np
+from prama.evaluator import VadEvaluator, evaluate_masks
+from prama.models import VadEvaluationResult
+
+reference = np.array([False, True, True, True, False, True, True, False])
+prediction = np.array([False, True, True, False, False, True, True, False])
+
+result = evaluate_masks(reference, prediction, hit_threshold=0.9)
+# 复用相同阈值也可通过类接口调用。
+assert VadEvaluator(hit_threshold=0.9).evaluate(reference, prediction) == result
+print(result.segment_hit_count, result.segment_miss_count)
+print(result.segment_precision, result.segment_recall, result.segment_f1)
+print(result.frame_accuracy, result.frame_precision, result.frame_recall)
+```
+
+`VadEvaluationResult` 是不可变数据类，包含帧级 TP/TN/FP/FN、accuracy、
+precision、recall、F1、specificity、balanced accuracy、误报率、漏检率，
+以及参考/预测段数、段命中/漏检/误报数和对应比率。
+**VAD 比率在 0–1 范围内，区别于 WER/CER 的百分数。**
+
+输入需为长度相同的布尔 mask；支持只读数组、非连续视图，以及去掉单维度后为
+一维的形状。不修改输入，也不保留共享计算状态，可在线程池中并发调用。
+为了和原 prama-server 实现严格对齐，空 mask、squeeze 后变为标量的单元素 mask、
+非布尔 dtype、形状不一致及不在 `[0, 1]` 的阈值都会报错。
+
+连续 True 区间视为语音段，采用左闭右开边界。参考段命中要求某一个预测段与它的
+交集长度除以参考段长度达到 `hit_threshold`，不会把多个预测段的覆盖率相加。
+预测段与任一参考段有正重叠就不算误报，不要求一对一匹配；端点相接不算重叠。
+阈值为 0 时延续原行为：只要预测段非空，每个参考段均算命中，即使不重叠。
+没有参考段时 recall 为 0，没有预测段时 precision 为 0。
+
+实现采用 NumPy 边界检测、`searchsorted` 和只枚举实际重叠候选的归约，
+避免分配参考段数 × 预测段数的矩阵。正式实现复用已计算的命中数。
+之前的 C 对照仅保留在实验目录；正式 VAD 路径使用纯 NumPy。
+
+运行回归测试：
+
+```bash
+poetry run pytest -q tests/test_vad
 ```
 
 ## 高层 API

@@ -1,0 +1,1 @@
+10000 cases: exact counts; ASan/UBSan/LSan clean if exit status is zero.
